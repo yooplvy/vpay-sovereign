@@ -1,0 +1,15 @@
+# SECRETS - NEVER COMMIT THESE
+.env
+
+# HARDHAT BUILD ARTIFACTS
+artifacts
+cache
+typechain
+coverage
+coverage.json
+
+# NODE MODULES
+node_modules
+
+# TEST FILES
+test/DebugOracle.js
