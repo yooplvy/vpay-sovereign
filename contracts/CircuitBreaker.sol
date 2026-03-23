@@ -25,7 +25,8 @@ contract CircuitBreaker is AccessControl {
 
     State   public state;
     uint256 public currentRatio;    // basis points (0–10000)
-    uint256 public pausedAt;        // timestamp when PAUSED started (for RESUMING calc)
+    uint256 public pausedAt;        // timestamp when PAUSED started
+    uint256 public resumingAt;      // timestamp when RESUMING started (24h window to NORMAL)
 
     // Timelock proposal
     struct ThresholdProposal {
@@ -47,6 +48,7 @@ contract CircuitBreaker is AccessControl {
 
     /// @notice Called by ReserveOracle whenever reserve ratios change.
     function updateRatio(uint256 verifiedBps, uint256 pendingBps) external onlyRole(ORACLE_ROLE) {
+        require(verifiedBps + pendingBps <= 10000, "CircuitBreaker: ratio exceeds 100%");
         uint256 totalBps = verifiedBps + pendingBps;
         currentRatio = totalBps;
 
@@ -63,12 +65,15 @@ contract CircuitBreaker is AccessControl {
         } else if (previous == State.PAUSED || previous == State.RESUMING) {
             // Coming out of PAUSED: RESUMING corridor requires ratio >= 7000 bps
             if (totalBps >= 7000) {
-                if (block.timestamp >= pausedAt + 24 hours) {
+                if (previous == State.PAUSED) {
+                    // First entry into RESUMING — record start timestamp, stay in RESUMING
+                    resumingAt = block.timestamp;
+                    next = State.RESUMING;
+                } else if (block.timestamp >= resumingAt + 24 hours) {
+                    // Already in RESUMING and 24h window has elapsed — promote to NORMAL
                     next = State.NORMAL;
                 } else {
                     next = State.RESUMING;
-                    // Record when RESUMING started (only on entry from PAUSED)
-                    if (previous == State.PAUSED) pausedAt = block.timestamp;
                 }
             } else {
                 next = State.ALERT;
@@ -95,6 +100,7 @@ contract CircuitBreaker is AccessControl {
         external
         onlyRole(DEFAULT_ADMIN_ROLE)
     {
+        require(!pendingProposal.active, "CircuitBreaker: proposal already pending");
         require(_alertBps > _pauseBps, "CircuitBreaker: alert must exceed pause");
         require(_pauseBps > HARD_FLOOR, "CircuitBreaker: pause must exceed hard floor");
         pendingProposal = ThresholdProposal({
