@@ -27,6 +27,7 @@ contract ReserveOracle is AccessControl {
 
     function updateVerified(uint256 _verifiedBps) external onlyRole(UPDATER_ROLE) {
         require(_verifiedBps <= 10000, "ReserveOracle: exceeds 100%");
+        require(_verifiedBps + pendingBps <= 10000, "ReserveOracle: total exceeds 100%");
         verifiedBps = _verifiedBps;
         lastUpdated = block.timestamp;
         emit RatioUpdated(verifiedBps, pendingBps, verifiedBps + pendingBps);
@@ -49,8 +50,10 @@ contract ReserveOracle is AccessControl {
     }
 
     function updateUSDC(uint256 _balance, uint256 _marketPrice) external onlyRole(UPDATER_ROLE) {
+        require(_marketPrice > 0, "ReserveOracle: zero price");
         usdcBalance     = _balance;
         usdcMarketPrice = _marketPrice;
+        lastUpdated = block.timestamp;
         emit USDCUpdated(_balance, _marketPrice);
     }
 
