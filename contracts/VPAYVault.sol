@@ -89,7 +89,7 @@ contract VPAYVault is AccessControl, ReentrancyGuard, Pausable {
 
     // ── Views ──────────────────────────────────────────────────────────────────
 
-    function getGoldPrice() public view returns (uint256) {
+    function getGoldPrice() public returns (uint256) {
         return goldOracle.getSafePrice();
     }
 
@@ -99,7 +99,7 @@ contract VPAYVault is AccessControl, ReentrancyGuard, Pausable {
 
     /// @notice Health factor in 1e4 precision. < 10000 = liquidatable.
     /// Example: 13000 = 1.30x (healthy), 9500 = 0.95x (liquidatable).
-    function getHealthFactor(bytes32 _nodeId) public view returns (uint256) {
+    function getHealthFactor(bytes32 _nodeId) public returns (uint256) {
         Loan storage loan = loans[_nodeId];
         if (!loan.isActive || loan.amount == 0) return type(uint256).max;
         uint256 collateralValueUSDC = (uint256(loan.collateralMass) * getGoldPrice()) / 1e12;

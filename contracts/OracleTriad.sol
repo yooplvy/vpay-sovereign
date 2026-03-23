@@ -31,7 +31,7 @@ contract OracleTriad is AccessControl {
         // TODO (mainnet): transfer DEFAULT_ADMIN_ROLE to Gnosis Safe immediately after deploy
     }
 
-    function getSafePrice() external view returns (uint256) {
+    function getSafePrice() external returns (uint256) {
         (uint256 clPrice, bool clValid)     = getChainlinkPrice();
         (uint256 bandPrice, bool bandValid) = getBandPrice();
 

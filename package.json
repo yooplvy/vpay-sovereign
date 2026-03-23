@@ -33,6 +33,8 @@
   },
   "type": "commonjs",
   "dependencies": {
+    "@layerzerolabs/lz-evm-protocol-v2": "^3.0.167",
+    "@layerzerolabs/oapp-evm": "^0.4.1",
     "dotenv": "^17.3.1"
   }
 }
