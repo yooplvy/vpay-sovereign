@@ -30,6 +30,7 @@ contract PaymentSOV is OFT, AccessControl, ReentrancyGuard {
         address _lzEndpoint,
         address _delegate
     ) OFT(_name, _symbol, _lzEndpoint, _delegate) Ownable(_delegate) {
+        require(_delegate != address(0), "PaymentSOV: delegate is zero address");
         // OFT base constructor: ERC20(_name, _symbol) + OFTCore(decimals(), _lzEndpoint, _delegate)
         // OFTCore → OApp → OAppCore: endpoint.setDelegate(_delegate)
         // Ownable(_delegate): sets owner (OZ v5 requires explicit initialOwner)
