@@ -43,6 +43,7 @@ contract OnRampEscrow is AccessControl, ReentrancyGuard {
     constructor(address _token, address _circuitBreaker, address _admin) {
         require(_token         != address(0), "OnRampEscrow: zero token");
         require(_circuitBreaker != address(0), "OnRampEscrow: zero cb");
+        require(_admin         != address(0), "OnRampEscrow: zero admin");
         token          = IPaymentSOV(_token);
         circuitBreaker = ICircuitBreaker(_circuitBreaker);
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
