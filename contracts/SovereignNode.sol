@@ -94,6 +94,11 @@ contract SovereignNode is AccessControl {
         require(_nonce > attestationNonces[_nodeId], "Nonce too old");
         require(_r2Score <= 10000,                   "r2Score out of range");
         require(_resilienceScore <= 10000,           "resilienceScore out of range");
+        // Plausibility cap: ±100g (100,000mg) — stops rogue NODE_ROLE keys overwriting
+        // valid attestations with garbage that permanently blocks attested() for 120s.
+        // The physics gate threshold is ±500mg; this guard is 200× wider.
+        require(_massDeviation_mg >= -100_000 && _massDeviation_mg <= 100_000,
+                "massDeviation implausible");
 
         attestationNonces[_nodeId] = _nonce;
 
