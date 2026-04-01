@@ -3,22 +3,26 @@ const { ethers } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
-async function signAttestation(node, nodeId, massKg, isSealed, nonce, signer) {
+async function signAttestation(node, nodeId, massKg, massDeviation_mg, r2Score, resilienceScore, isSealed, nonce, signer) {
+  const { chainId } = await ethers.provider.getNetwork();
   const domain = {
     name: "SovereignNode",
-    version: "5.0",
-    chainId: Number((await ethers.provider.getNetwork()).chainId),
+    version: "6.0",
+    chainId: Number(chainId),
     verifyingContract: node.address,
   };
   const types = {
     Attestation: [
-      { name: "nodeId", type: "bytes32" },
-      { name: "massKg", type: "uint128" },
-      { name: "isSealed", type: "bool" },
-      { name: "nonce", type: "uint256" },
+      { name: "nodeId",           type: "bytes32" },
+      { name: "massKg",           type: "uint128" },
+      { name: "massDeviation_mg", type: "int64"   },
+      { name: "r2Score",          type: "uint32"  },
+      { name: "resilienceScore",  type: "uint32"  },
+      { name: "isSealed",         type: "bool"    },
+      { name: "nonce",            type: "uint256" },
     ],
   };
-  const value = { nodeId, massKg, isSealed, nonce };
+  const value = { nodeId, massKg, massDeviation_mg, r2Score, resilienceScore, isSealed, nonce };
   if (typeof signer.signTypedData === "function") return signer.signTypedData(domain, types, value);
   return signer._signTypedData(domain, types, value);
 }
@@ -84,9 +88,9 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
   describe("Attestation Security", function () {
     it("Should REVERT on nonce replay", async () => {
       const { node, owner, nodeId } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
-      await expect(node.submitAttestation(nodeId, 1000, true, 1, sig)).to.be.revertedWith("Nonce too old");
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
+      await expect(node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig)).to.be.revertedWith("Nonce too old");
     });
 
     it("Should REVERT on cross-chain replay", async () => {
@@ -95,7 +99,7 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
       const types = { Attestation: [{ name: "nodeId", type: "bytes32" }, { name: "massKg", type: "uint128" }, { name: "isSealed", type: "bool" }, { name: "nonce", type: "uint256" }] };
       const value = { nodeId, massKg: 1000, isSealed: true, nonce: 1 };
       const sig = await signRaw(wrongDomain, types, value, owner);
-      await expect(node.submitAttestation(nodeId, 1000, true, 1, sig)).to.be.reverted;
+      await expect(node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig)).to.be.reverted;
     });
   });
 
@@ -107,27 +111,27 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
 
     it("Should REVERT if attestation is expired", async () => {
       const { vault, node, owner, nodeId } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
       await time.increase(3601);
       await expect(vault.lockAndBorrow(nodeId, ethers.utils.parseUnits("100", 6), 30)).to.be.revertedWithCustomError(vault, "VAULT__StaleAttestation");
     });
 
     it("Should REVERT on double borrow", async () => {
       const { vault, node, owner, nodeId } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
       await vault.lockAndBorrow(nodeId, ethers.utils.parseUnits("100", 6), 30);
 
-      const sig2 = await signAttestation(node, nodeId, 1000, true, 2, owner);
-      await node.submitAttestation(nodeId, 1000, true, 2, sig2);
+      const sig2 = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 2, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 2, sig2);
       await expect(vault.lockAndBorrow(nodeId, ethers.utils.parseUnits("100", 6), 30)).to.be.revertedWithCustomError(vault, "VAULT__LoanActive");
     });
 
     it("Should SUCCEED on valid borrow and disburse amount minus origination fee", async () => {
       const { vault, node, owner, nodeId, usdc } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
 
       const amount = ethers.utils.parseUnits("100", 6);
       const fee = amount.mul(50).div(10000); // 50 bps origination fee
@@ -142,16 +146,16 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
   describe("Repayment Logic", function () {
     it("Should REVERT if caller is not borrower", async () => {
       const { vault, node, owner, user, nodeId } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
       await vault.lockAndBorrow(nodeId, ethers.utils.parseUnits("100", 6), 30);
       await expect(vault.connect(user).repayLoan(nodeId)).to.be.revertedWithCustomError(vault, "VAULT__NotOwner");
     });
 
     it("Should clear loan on repayment", async () => {
       const { vault, node, owner, nodeId, usdc } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
       const amount = ethers.utils.parseUnits("100", 6);
       await vault.lockAndBorrow(nodeId, amount, 30);
       await usdc.approve(vault.address, ethers.constants.MaxUint256);
@@ -161,8 +165,8 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
 
     it("Should return correct repaymentDue (full loan amount, not payout)", async () => {
       const { vault, node, owner, nodeId } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
       const amount = ethers.utils.parseUnits("100", 6);
       await vault.lockAndBorrow(nodeId, amount, 30);
       // Borrower owes the full requested amount; fee was deducted from disbursement
@@ -173,16 +177,16 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
   describe("Liquidation Logic", function () {
     it("Should REVERT if loan is not yet expired", async () => {
       const { vault, node, owner, liquidator, nodeId } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
       await vault.lockAndBorrow(nodeId, ethers.utils.parseUnits("100", 6), 30);
       await expect(vault.connect(liquidator).liquidateExpired(nodeId)).to.be.revertedWithCustomError(vault, "VAULT__LoanNotExpired");
     });
 
     it("Should SUCCEED on expired loan: clear loan and transfer node to liquidator", async () => {
       const { vault, node, owner, liquidator, nodeId, usdc } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
 
       const amount = ethers.utils.parseUnits("100", 6);
       await vault.lockAndBorrow(nodeId, amount, 30);
@@ -205,8 +209,8 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
 
     it("Should REVERT if liquidator provides insufficient payoff (< 108%)", async () => {
       const { vault, node, owner, liquidator, nodeId, usdc } = await loadFixture(deployProtocolFixture);
-      const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
-      await node.submitAttestation(nodeId, 1000, true, 1, sig);
+      const sig = await signAttestation(node, nodeId, 1000, 0, 9800, 9000, true, 1, owner);
+      await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, 1, sig);
 
       const amount = ethers.utils.parseUnits("100", 6);
       await vault.lockAndBorrow(nodeId, amount, 30);
