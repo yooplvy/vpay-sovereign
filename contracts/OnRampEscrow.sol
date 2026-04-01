@@ -3,12 +3,14 @@
 // @notice Gateway calls createRateLock() when citizen confirms amount.
 //         TTL = 120s from creation. Only confirmAndMint() within TTL triggers mint.
 //         Circuit breaker checked at mint time — PAUSED/REVERTED states block mint.
+//         Physics gate (SovereignNode.attested) checked at mint time — unattested node blocks mint.
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IPaymentSOV.sol";
 import "./interfaces/ICircuitBreaker.sol";
+import "./SovereignNode.sol";
 
 error TxAlreadyExists();
 error TxAlreadyProcessed();
@@ -24,6 +26,7 @@ contract OnRampEscrow is AccessControl, ReentrancyGuard {
 
     IPaymentSOV     public immutable token;
     ICircuitBreaker public immutable circuitBreaker;
+    SovereignNode   public immutable sovereignNode;
 
     enum TxStatus { NONE, PENDING, MINTED, CANCELLED }
 
@@ -40,12 +43,14 @@ contract OnRampEscrow is AccessControl, ReentrancyGuard {
     event RateLockMinted(bytes32 indexed txId, address indexed recipient, uint256 sovAmount);
     event RateLockCancelled(bytes32 indexed txId);
 
-    constructor(address _token, address _circuitBreaker, address _admin) {
-        require(_token         != address(0), "OnRampEscrow: zero token");
+    constructor(address _token, address _circuitBreaker, address _sovereignNode, address _admin) {
+        require(_token          != address(0), "OnRampEscrow: zero token");
         require(_circuitBreaker != address(0), "OnRampEscrow: zero cb");
-        require(_admin         != address(0), "OnRampEscrow: zero admin");
+        require(_sovereignNode  != address(0), "OnRampEscrow: zero node");
+        require(_admin          != address(0), "OnRampEscrow: zero admin");
         token          = IPaymentSOV(_token);
         circuitBreaker = ICircuitBreaker(_circuitBreaker);
+        sovereignNode  = SovereignNode(_sovereignNode);
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
     }
 
@@ -70,7 +75,9 @@ contract OnRampEscrow is AccessControl, ReentrancyGuard {
     }
 
     /// @notice Called after Flutterwave webhook confirms payment.
-    function confirmAndMint(bytes32 txId)
+    /// @param txId   The rate lock transaction ID.
+    /// @param nodeId The SovereignNode ID that must have a passing physics gate attestation.
+    function confirmAndMint(bytes32 txId, bytes32 nodeId)
         external
         onlyRole(GATEWAY_ROLE)
         nonReentrant
@@ -80,6 +87,7 @@ contract OnRampEscrow is AccessControl, ReentrancyGuard {
         if (lock.status != TxStatus.PENDING) revert TxAlreadyProcessed();
         if (block.timestamp > lock.expiresAt) revert RateLockExpired();
         if (!circuitBreaker.canMint())        revert MintingPaused();
+        require(sovereignNode.attested(nodeId), "OnRampEscrow: physics gate not attested");
 
         lock.status = TxStatus.MINTED;
         token.mint(lock.recipient, lock.sovAmount);

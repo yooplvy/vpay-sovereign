@@ -2,6 +2,46 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture, time } = require("@nomicfoundation/hardhat-network-helpers");
 
+// Helper: sign a v6.0 physics gate attestation
+async function signAttestation6(node, nodeId, massKg, massDeviation_mg, r2Score, resilienceScore, isSealed, nonce, signer) {
+  const { chainId } = await ethers.provider.getNetwork();
+  const domain = {
+    name: "SovereignNode",
+    version: "6.0",
+    chainId: Number(chainId),
+    verifyingContract: node.address,
+  };
+  const types = {
+    Attestation: [
+      { name: "nodeId",           type: "bytes32" },
+      { name: "massKg",           type: "uint128" },
+      { name: "massDeviation_mg", type: "int64"   },
+      { name: "r2Score",          type: "uint32"  },
+      { name: "resilienceScore",  type: "uint32"  },
+      { name: "isSealed",         type: "bool"    },
+      { name: "nonce",            type: "uint256" },
+    ],
+  };
+  const value = { nodeId, massKg, massDeviation_mg, r2Score, resilienceScore, isSealed, nonce };
+  if (typeof signer.signTypedData === "function") return signer.signTypedData(domain, types, value);
+  return signer._signTypedData(domain, types, value);
+}
+
+// Submit a passing attestation to the node
+async function submitPassingAttestation(node, nodeId, nonce, signer) {
+  const sig = await signAttestation6(
+    node, nodeId,
+    1000,  // massKg
+    0,     // massDeviation_mg (within ±500)
+    9800,  // r2Score (≥ 9700)
+    9000,  // resilienceScore (≥ 8800)
+    true,  // isSealed
+    nonce,
+    signer
+  );
+  await node.submitAttestation(nodeId, 1000, 0, 9800, 9000, true, nonce, sig);
+}
+
 describe("OnRampEscrow", function () {
   before(async () => {
     const { chainId } = await ethers.provider.getNetwork();
@@ -26,10 +66,21 @@ describe("OnRampEscrow", function () {
     const cb = await CircuitBreaker.deploy(owner.address);
     await cb.deployed();
 
+    // Deploy SovereignNode and register a test node
+    const node = await (await ethers.getContractFactory("SovereignNode")).deploy();
+    await node.deployed();
+    const NODE_ROLE = await node.NODE_ROLE();
+    const GOVERNANCE_ROLE = await node.GOVERNANCE_ROLE();
+    await node.grantRole(NODE_ROLE, owner.address);
+    await node.grantRole(GOVERNANCE_ROLE, owner.address);
+    const nodeId = ethers.utils.formatBytes32String("GS-ACC-01");
+    await node.registerNode(nodeId, owner.address);
+
     const OnRampEscrow = await ethers.getContractFactory("OnRampEscrow");
     const escrow = await OnRampEscrow.deploy(
       token.address,
       cb.address,
+      node.address,
       owner.address
     );
     await escrow.deployed();
@@ -44,7 +95,7 @@ describe("OnRampEscrow", function () {
     await cb.updateRatio(8500, 0);
 
     const TTL = 120; // 120 seconds
-    return { token, cb, escrow, owner, gateway, user, other, TTL };
+    return { token, cb, escrow, node, owner, gateway, user, other, TTL, nodeId };
   }
 
   describe("Rate lock creation", () => {
@@ -75,41 +126,58 @@ describe("OnRampEscrow", function () {
   });
 
   describe("Mint on confirmation", () => {
-    it("mints SOV to user after gateway confirms", async () => {
-      const { escrow, token, gateway, user } = await loadFixture(deployFixture);
+    it("mints SOV to user after gateway confirms (with valid attestation)", async () => {
+      const { escrow, token, node, owner, gateway, user, nodeId } = await loadFixture(deployFixture);
       const txId = ethers.utils.id("tx1");
       const amt = ethers.utils.parseEther("0.00347");
       await escrow.connect(gateway).createRateLock(txId, user.address, amt);
-      await expect(escrow.connect(gateway).confirmAndMint(txId))
+      // Submit a passing physics gate attestation before minting
+      await submitPassingAttestation(node, nodeId, 1, owner);
+      await expect(escrow.connect(gateway).confirmAndMint(txId, nodeId))
         .to.emit(token, "Transfer")
         .withArgs(ethers.constants.AddressZero, user.address, amt);
     });
 
     it("reverts mint after TTL expires", async () => {
-      const { escrow, gateway, user, TTL } = await loadFixture(deployFixture);
+      const { escrow, gateway, user, nodeId, TTL } = await loadFixture(deployFixture);
       const txId = ethers.utils.id("tx1");
       await escrow.connect(gateway).createRateLock(txId, user.address, ethers.utils.parseEther("1"));
       await time.increase(TTL + 1);
-      await expect(escrow.connect(gateway).confirmAndMint(txId))
+      // No attestation needed — RateLockExpired fires before the physics gate check
+      await expect(escrow.connect(gateway).confirmAndMint(txId, nodeId))
         .to.be.revertedWithCustomError(escrow, "RateLockExpired");
     });
 
     it("reverts mint if circuit breaker is PAUSED", async () => {
-      const { escrow, cb, gateway, user } = await loadFixture(deployFixture);
+      const { escrow, cb, gateway, user, nodeId } = await loadFixture(deployFixture);
       const txId = ethers.utils.id("tx1");
       await escrow.connect(gateway).createRateLock(txId, user.address, ethers.utils.parseEther("1"));
       await cb.updateRatio(5000, 0); // → PAUSED
-      await expect(escrow.connect(gateway).confirmAndMint(txId))
+      // No attestation needed — MintingPaused fires before the physics gate check
+      await expect(escrow.connect(gateway).confirmAndMint(txId, nodeId))
         .to.be.revertedWithCustomError(escrow, "MintingPaused");
     });
 
     it("cannot confirm same txId twice (idempotency)", async () => {
-      const { escrow, gateway, user } = await loadFixture(deployFixture);
+      const { escrow, node, owner, gateway, user, nodeId } = await loadFixture(deployFixture);
       const txId = ethers.utils.id("tx1");
       await escrow.connect(gateway).createRateLock(txId, user.address, ethers.utils.parseEther("0.001"));
-      await escrow.connect(gateway).confirmAndMint(txId);
-      await expect(escrow.connect(gateway).confirmAndMint(txId))
+      // First mint — needs a passing attestation
+      await submitPassingAttestation(node, nodeId, 1, owner);
+      await escrow.connect(gateway).confirmAndMint(txId, nodeId);
+      // Second attempt — already MINTED
+      await expect(escrow.connect(gateway).confirmAndMint(txId, nodeId))
         .to.be.revertedWithCustomError(escrow, "TxAlreadyProcessed");
+    });
+
+    it("REVERTS confirmAndMint when physics gate not attested", async () => {
+      const { escrow, gateway, user, nodeId } = await loadFixture(deployFixture);
+      const txId = ethers.utils.formatBytes32String("TX-GATE-TEST");
+      await escrow.connect(gateway).createRateLock(txId, user.address, ethers.utils.parseUnits("100", 18));
+      // Deliberately skip attestation — physics gate must block mint
+      await expect(
+        escrow.connect(gateway).confirmAndMint(txId, nodeId)
+      ).to.be.revertedWith("OnRampEscrow: physics gate not attested");
     });
   });
 
