@@ -203,7 +203,7 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
       expect(await node.nodeOwners(nodeId)).to.equal(liquidator.address);
     });
 
-    it("Should REVERT if liquidator provides insufficient payoff (< 105%)", async () => {
+    it("Should REVERT if liquidator provides insufficient payoff (< 108%)", async () => {
       const { vault, node, owner, liquidator, nodeId, usdc } = await loadFixture(deployProtocolFixture);
       const sig = await signAttestation(node, nodeId, 1000, true, 1, owner);
       await node.submitAttestation(nodeId, 1000, true, 1, sig);
@@ -213,7 +213,7 @@ describe("VPAY Sovereign Stack — Security Audit v7", function () {
 
       await time.increase(30 * 24 * 3600 + 1);
 
-      // Approve only 100%, not the required 105%
+      // Approve only 100%, not the required 108% (LIQUIDATION_PENALTY = 8)
       await usdc.transfer(liquidator.address, amount);
       await usdc.connect(liquidator).approve(vault.address, amount);
 
