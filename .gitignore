@@ -13,3 +13,4 @@ node_modules
 
 # TEST FILES
 test/DebugOracle.js
+deployments/
