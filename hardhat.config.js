@@ -36,8 +36,9 @@ module.exports = {
     apiKey: {
       arbitrumSepolia: process.env.ARBISCAN_API_KEY || "",
       arbitrumOne:     process.env.ARBISCAN_API_KEY || "",
-      polygon:         process.env.POLYGONSCAN_API_KEY || "",
-      polygonAmoy:     process.env.POLYGONSCAN_API_KEY || ""
+      polygon:          process.env.POLYGONSCAN_API_KEY || "",
+      polygon_mainnet:  process.env.POLYGONSCAN_API_KEY || "",
+      polygonAmoy:      process.env.POLYGONSCAN_API_KEY || ""
     },
     customChains: [
       {
@@ -46,6 +47,14 @@ module.exports = {
         urls: {
           apiURL: "https://api-sepolia.arbiscan.io/api",
           browserURL: "https://sepolia.arbiscan.io"
+        }
+      },
+      {
+        network: "polygon_mainnet",
+        chainId: 137,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=137",
+          browserURL: "https://polygonscan.com"
         }
       },
       {
