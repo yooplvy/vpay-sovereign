@@ -24,9 +24,12 @@ module.exports = {
       chainId: 80002
     },
     polygon_mainnet: {
-      url: process.env.POLYGON_RPC_URL || "https://polygon-rpc.com",
+      url: process.env.POLYGON_RPC_URL || "https://polygon-bor-rpc.publicnode.com",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 137
+      chainId: 137,
+      gasPrice: 1_000_000_000_000, // 1000 gwei — max to guarantee mempool acceptance
+      gas: 10_000_000,            // 10M gas limit — covers large OFT contracts
+      timeout: 180000             // 3-minute transaction timeout
     }
   },
   etherscan: {

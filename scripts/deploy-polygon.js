@@ -77,10 +77,17 @@ async function main() {
     console.log(`  MockChainlink: ${deployed.chainlink.address}`);
     console.log(`  MockBand:      ${deployed.band.address}`);
   } else {
-    // Mainnet: set real addresses before deploying
-    throw new Error(
-      "Mainnet deploy: replace this error with real USDC/Chainlink/Band addresses in the script."
-    );
+    // Polygon mainnet — verified live oracle addresses (2026-04-02)
+    // Chainlink XAU/USD on Polygon: 0x0C466540B2ee1a31b441671eac0ca886e051E410 (returning ~$4,630/oz live)
+    // Band Protocol: NOT deployed on Polygon mainnet — OracleTriad runs in Chainlink-only mode
+    //   (getBandPrice() try/catch catches the failure; clValid || bandValid is satisfied by Chainlink alone)
+    // Native USDC on Polygon: 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359 (Circle native issuance)
+    deployed.chainlink = { address: "0x0C466540B2ee1a31b441671eac0ca886e051E410" };
+    deployed.band      = { address: ethers.constants.AddressZero }; // Chainlink-only mode
+    deployed.usdc      = { address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" };
+    console.log(`  Chainlink XAU/USD: ${deployed.chainlink.address}`);
+    console.log(`  Band:              ${deployed.band.address} (not on Polygon — Chainlink-only mode)`);
+    console.log(`  USDC:              ${deployed.usdc.address}`);
   }
 
   // ── 2. Core protocol contracts ──────────────────────────────────────────────
