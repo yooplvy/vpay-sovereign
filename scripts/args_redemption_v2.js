@@ -1,0 +1,5 @@
+module.exports = [
+  "0x37f68e66d142C31a2c01Eb36e8b5227bfC04B4Dc", // VPAYToken
+  "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", // USDC
+  "0x0C466540B2ee1a31b441671eac0ca886e051E410", // Chainlink XAU/USD
+];

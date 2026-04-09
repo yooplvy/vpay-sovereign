@@ -36,4 +36,11 @@ contract VPAYToken is ERC20, AccessControl {
     function burn(uint256 amount) external onlyRole(BURNER_ROLE) {
         _burn(_msgSender(), amount);
     }
+
+    /// @notice Burns `amount` from `from`'s balance.
+    ///         Caller must have BURNER_ROLE. `from` must have approved caller for at least `amount`.
+    function burnFrom(address from, uint256 amount) external onlyRole(BURNER_ROLE) {
+        _spendAllowance(from, _msgSender(), amount);
+        _burn(from, amount);
+    }
 }
