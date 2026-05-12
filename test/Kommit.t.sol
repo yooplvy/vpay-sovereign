@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../KommitBridge.sol";
+import "../MinerRewards.sol";
 import "../interfaces/IKommitBridge.sol";
 import "../interfaces/ISovereignToken.sol";
 import "../interfaces/ICircuitBreaker.sol";
@@ -203,7 +204,7 @@ abstract contract KommitFixture is Test {
 contract KommitBridge_HappyPath_Test is KommitFixture {
     function test_DeploymentConstants() public view {
         assertEq(bridge.ARCHITECT(),   "ANO-YOOFI-AGYEI");
-        assertEq(bridge.PROTOCOL_ID(), "VPAY-GENESIS-KOMMIT-v1.1");
+        assertEq(bridge.PROTOCOL_ID(), "VPAY-GENESIS-KOMMIT-v1.2");
         assertEq(bridge.IP_CODENAME(), "KOMMIT");
         assertEq(address(bridge.sovToken()),   address(sov));
         assertEq(address(bridge.circuitBreaker()), address(cb));
@@ -1453,5 +1454,334 @@ contract KommitBridge_Invariant_Test is KommitFixture {
         assertGe(bridge.challengerBondAmount(), bridge.reasonerBondAmount());
         assertGt(bridge.reasonerBondAmount(),   0);
         assertGt(bridge.challengerBondAmount(), 0);
+    }
+}
+
+/*//////////////////////////////////////////////////////////////
+          v1.2 — MED-3 SLASH REMAINDER DISTRIBUTION TESTS
+//////////////////////////////////////////////////////////////*/
+
+/// @notice Malicious IMinerRewards pool that attempts to re-enter the bridge
+///         on creditReward(). Used in test_v12_ReentrancyGuard_CreditRewardCannotReenter.
+contract MaliciousMinerRewards {
+    address public target;
+    uint256 public targetId;
+
+    function setTarget(address _target) external { target = _target; }
+    function setTargetId(uint256 _id) external { targetId = _id; }
+
+    /// @dev Attempts re-entry into target.oracleSlash(). nonReentrant on the
+    ///      bridge will block it; try/catch in _creditSlashRemainder absorbs
+    ///      the revert so the outer slash still completes.
+    function creditReward(bytes32, uint256) external {
+        if (target != address(0) && targetId != 0) {
+            try KommitBridge(target).oracleSlash(targetId, bytes32(0)) {} catch {}
+        }
+    }
+}
+
+/// @notice Dedicated test class for v1.2 slash-remainder distribution (MED-3 fix).
+///         Uses a live MinerRewards deployment (not a bare address) as the pool.
+contract KommitBridge_V12_Distribution_Test is Test {
+    // ── Actors ──────────────────────────────
+    address admin      = address(this);
+    address reasoner   = address(0xBEEF01);
+    address challenger = address(0xC1A1);
+    address oracle     = address(0x07AC1E);
+    address operatorA  = address(0xA111);
+    address operatorB  = address(0xB111);
+
+    // ── Contracts ───────────────────────────
+    MockSov      sov;
+    MockCB       cb;
+    MinerRewards rewardPool;
+    KommitBridge bridge;
+
+    // ── Constants ───────────────────────────
+    bytes32 constant MODEL_HASH = keccak256("hermes-v2-zeus-orchestrator");
+    bytes32 constant CONTEXT    = keccak256("prompt+state+tools");
+    bytes32 constant OUTPUT     = keccak256("the-zeus-said-trade");
+    bytes32 constant SEED       = bytes32(uint256(0x1234567890));
+    bytes32 constant SALT       = bytes32(uint256(0xDEADBEEFCAFE));
+    bytes32 constant NODE_A     = keccak256("node-alpha");
+    bytes32 constant NODE_B     = keccak256("node-beta");
+
+    function setUp() public {
+        sov = new MockSov();
+        cb  = new MockCB();
+
+        // Deploy real MinerRewards (not a bare address) so creditReward works.
+        rewardPool = new MinerRewards(address(sov));
+
+        // Deploy bridge pointing at the real MinerRewards pool.
+        bridge = new KommitBridge(address(sov), address(cb), address(rewardPool));
+
+        // Grant DISTRIBUTOR_ROLE on MinerRewards to bridge (MED-3 prerequisite).
+        rewardPool.grantRole(rewardPool.DISTRIBUTOR_ROLE(), address(bridge));
+
+        // Register operators in MinerRewards.
+        rewardPool.registerOperator(NODE_A, operatorA);
+        rewardPool.registerOperator(NODE_B, operatorB);
+
+        // Grant roles on bridge.
+        bridge.grantRole(bridge.REASONER_ROLE(), reasoner);
+        bridge.grantRole(bridge.ORACLE_ROLE(), oracle);
+        bridge.registerModel(MODEL_HASH, "hermes-v2-zeus-orchestrator");
+
+        // Fund actors.
+        sov.mintDirect(reasoner,   1_000e18);
+        sov.mintDirect(challenger, 1_000e18);
+        vm.prank(reasoner);   sov.approve(address(bridge), type(uint256).max);
+        vm.prank(challenger); sov.approve(address(bridge), type(uint256).max);
+
+        vm.label(reasoner,    "Reasoner");
+        vm.label(challenger,  "Challenger");
+        vm.label(oracle,      "Oracle");
+        vm.label(operatorA,   "OperatorA");
+        vm.label(operatorB,   "OperatorB");
+        vm.label(address(rewardPool), "MinerRewards");
+    }
+
+    function _commit(bytes32 seed, bytes32 salt) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(seed, salt));
+    }
+
+    /// @dev Drive an attestation to Revealed state and oracle-slash it.
+    ///      Returns the attestation id.
+    function _doOracleSlash() internal returns (uint256 id) {
+        vm.prank(reasoner);
+        id = bridge.attestReasoning(MODEL_HASH, CONTEXT, _commit(SEED, SALT), OUTPUT);
+        vm.prank(challenger);
+        bridge.challenge(id, keccak256("wrong-replay"));
+        bridge.revealSeed(id, SEED, SALT);
+        vm.prank(oracle);
+        // Oracle computes a different hash → mismatch → slash
+        bridge.oracleSlash(id, keccak256("different-from-output"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // (a) Successful slash → remainder credited correctly to period operators
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @notice With two nodes registered for the current period, the 5 SOV
+    ///         remainder (50% of 10 SOV bond) is split 2.5 SOV each.
+    function test_v12_SlashRemainder_CreditedEquallyToTwoNodes() public {
+        bytes32[] memory nodes = new bytes32[](2);
+        nodes[0] = NODE_A;
+        nodes[1] = NODE_B;
+        bridge.openSlashPeriod(nodes);
+
+        _doOracleSlash();
+
+        // reasonerBond = 10e18, bounty = 5e18 (50%), remainder = 5e18
+        // 2 nodes → 2.5e18 each
+        assertEq(rewardPool.pendingRewards(operatorA), 2.5e18, "operatorA credit");
+        assertEq(rewardPool.pendingRewards(operatorB), 2.5e18, "operatorB credit");
+        assertEq(rewardPool.totalDistributed(),        5e18,  "total distributed");
+        // Pool holds the 5 SOV so operators can claim
+        assertEq(sov.balanceOf(address(rewardPool)),   5e18,  "pool balance");
+    }
+
+    /// @notice With a single node, the full 5 SOV remainder is credited to it.
+    function test_v12_SlashRemainder_CreditedToSingleNode() public {
+        bytes32[] memory nodes = new bytes32[](1);
+        nodes[0] = NODE_A;
+        bridge.openSlashPeriod(nodes);
+
+        _doOracleSlash();
+
+        assertEq(rewardPool.pendingRewards(operatorA), 5e18, "operatorA full credit");
+        assertEq(rewardPool.pendingRewards(operatorB), 0,    "operatorB untouched");
+        assertEq(rewardPool.totalDistributed(),        5e18);
+    }
+
+    /// @notice Opening a second period rotates the active set — slashes after
+    ///         the rotation credit the new period's nodes, not the old ones.
+    function test_v12_SlashRemainder_RotatingPeriodCreditsNewNodes() public {
+        // Period 1: only NODE_A
+        bytes32[] memory period1 = new bytes32[](1);
+        period1[0] = NODE_A;
+        bridge.openSlashPeriod(period1);
+
+        _doOracleSlash(); // credited to period 1 (NODE_A only)
+
+        // Period 2: only NODE_B
+        bytes32[] memory period2 = new bytes32[](1);
+        period2[0] = NODE_B;
+        bridge.openSlashPeriod(period2);
+
+        _doOracleSlash(); // credited to period 2 (NODE_B only)
+
+        assertEq(rewardPool.pendingRewards(operatorA), 5e18, "period-1 credit");
+        assertEq(rewardPool.pendingRewards(operatorB), 5e18, "period-2 credit");
+    }
+
+    /// @notice Operator can claim the credited SOV after a slash.
+    function test_v12_SlashRemainder_OperatorCanClaim() public {
+        bytes32[] memory nodes = new bytes32[](1);
+        nodes[0] = NODE_A;
+        bridge.openSlashPeriod(nodes);
+
+        _doOracleSlash();
+
+        uint256 before = sov.balanceOf(operatorA);
+        vm.prank(operatorA);
+        rewardPool.claim();
+        assertEq(sov.balanceOf(operatorA) - before, 5e18);
+        assertEq(rewardPool.pendingRewards(operatorA), 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // (b) Edge case: no operators existed in the period → graceful fallback
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @notice When no period has been opened (currentPeriodId == 0), the slash
+    ///         still completes and SOV lands in the pool balance — same as v1.1.
+    ///         No revert, no credit accounting.
+    function test_v12_SlashRemainder_NoPeriodOpened_GracefulFallback() public {
+        // Deliberately do NOT call openSlashPeriod — period 0 is always empty.
+        uint256 poolBefore = sov.balanceOf(address(rewardPool));
+
+        _doOracleSlash(); // must not revert
+
+        assertEq(sov.balanceOf(address(rewardPool)), poolBefore + 5e18, "SOV lands in pool");
+        assertEq(rewardPool.totalDistributed(), 0,  "no credit accounting");
+        assertEq(rewardPool.pendingRewards(operatorA), 0);
+        assertEq(rewardPool.pendingRewards(operatorB), 0);
+    }
+
+    /// @notice An explicitly empty period (openSlashPeriod with empty array) is
+    ///         the same as no period — SOV lands in pool balance uncredited.
+    function test_v12_SlashRemainder_EmptyPeriod_GracefulFallback() public {
+        bytes32[] memory empty = new bytes32[](0);
+        bridge.openSlashPeriod(empty);
+
+        uint256 poolBefore = sov.balanceOf(address(rewardPool));
+        _doOracleSlash();
+
+        assertEq(sov.balanceOf(address(rewardPool)), poolBefore + 5e18);
+        assertEq(rewardPool.totalDistributed(), 0);
+    }
+
+    /// @notice A nodeId in the period with no registered operator: creditReward
+    ///         reverts for that node; try/catch absorbs it; slash completes and
+    ///         the other (valid) node still gets credited.
+    function test_v12_SlashRemainder_UnregisteredNode_IsSkipped() public {
+        bytes32 ghostNode = keccak256("ghost-no-operator");
+        bytes32[] memory nodes = new bytes32[](2);
+        nodes[0] = ghostNode; // no operator registered
+        nodes[1] = NODE_A;    // has operator
+        bridge.openSlashPeriod(nodes);
+
+        _doOracleSlash(); // must not revert
+
+        // perNode = 5e18 / 2 = 2.5e18; ghost skipped; NODE_A credited
+        assertEq(rewardPool.pendingRewards(operatorA), 2.5e18, "valid node credited");
+        // Pool holds 5 SOV total; 2.5 credited, 2.5 stays as ghost dust
+        assertEq(sov.balanceOf(address(rewardPool)), 5e18);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // (c) Re-entrancy guard: creditReward cannot re-enter oracleSlash
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @notice A malicious pool that tries to call oracleSlash() from within
+    ///         creditReward() is defeated by nonReentrant. The try/catch in
+    ///         _creditSlashRemainder absorbs the reversion so the outer slash
+    ///         still lands and the attestation status is correctly Slashed.
+    function test_v12_ReentrancyGuard_CreditRewardCannotReenter() public {
+        // Deploy bridge pointing at the malicious pool.
+        MaliciousMinerRewards malPool = new MaliciousMinerRewards();
+        KommitBridge attackBridge = new KommitBridge(address(sov), address(cb), address(malPool));
+        attackBridge.grantRole(attackBridge.REASONER_ROLE(), reasoner);
+        attackBridge.grantRole(attackBridge.ORACLE_ROLE(), oracle);
+        attackBridge.registerModel(MODEL_HASH, "hermes-v2-zeus-orchestrator");
+
+        // Open a period with one node so _creditSlashRemainder actually fires.
+        bytes32[] memory nodes = new bytes32[](1);
+        nodes[0] = keccak256("node-x");
+        attackBridge.openSlashPeriod(nodes);
+
+        // Point malPool back at attackBridge.
+        malPool.setTarget(address(attackBridge));
+
+        vm.prank(reasoner);   sov.approve(address(attackBridge), type(uint256).max);
+        vm.prank(challenger); sov.approve(address(attackBridge), type(uint256).max);
+
+        vm.prank(reasoner);
+        uint256 id = attackBridge.attestReasoning(MODEL_HASH, CONTEXT, _commit(SEED, SALT), OUTPUT);
+        vm.prank(challenger);
+        attackBridge.challenge(id, keccak256("wrong"));
+        attackBridge.revealSeed(id, SEED, SALT);
+
+        malPool.setTargetId(id);
+
+        // Oracle slash: malPool.creditReward will try to re-enter oracleSlash.
+        // nonReentrant blocks re-entry; try/catch swallows the revert;
+        // outer transaction completes normally.
+        vm.prank(oracle);
+        attackBridge.oracleSlash(id, keccak256("different")); // must NOT revert
+
+        // Confirm the attestation is fully settled — no partial state.
+        (, , , , , , , , , , IKommitBridge.AttestationStatus status)
+            = attackBridge.attestations(id);
+        assertEq(uint8(status), uint8(IKommitBridge.AttestationStatus.Slashed));
+        assertEq(attackBridge.totalSlashed(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Admin — openSlashPeriod guards
+    // ─────────────────────────────────────────────────────────────────────────
+
+    function test_v12_OpenSlashPeriod_OnlyAdmin() public {
+        bytes32[] memory nodes = new bytes32[](1);
+        nodes[0] = NODE_A;
+        vm.prank(address(0xBAD));
+        vm.expectRevert();
+        bridge.openSlashPeriod(nodes);
+    }
+
+    function test_v12_OpenSlashPeriod_RejectsTooManyNodes() public {
+        bytes32[] memory nodes = new bytes32[](201);
+        vm.expectRevert(bytes("Too many nodes"));
+        bridge.openSlashPeriod(nodes);
+    }
+
+    function test_v12_OpenSlashPeriod_IncrementsPeriodId() public {
+        assertEq(bridge.currentPeriodId(), 0);
+        bytes32[] memory nodes = new bytes32[](1);
+        nodes[0] = NODE_A;
+        bridge.openSlashPeriod(nodes);
+        assertEq(bridge.currentPeriodId(), 1);
+        bridge.openSlashPeriod(nodes);
+        assertEq(bridge.currentPeriodId(), 2);
+    }
+
+    function test_v12_PeriodNodes_View() public {
+        bytes32[] memory nodes = new bytes32[](2);
+        nodes[0] = NODE_A;
+        nodes[1] = NODE_B;
+        bridge.openSlashPeriod(nodes);
+        bytes32[] memory stored = bridge.periodNodes(1);
+        assertEq(stored.length, 2);
+        assertEq(stored[0], NODE_A);
+        assertEq(stored[1], NODE_B);
+    }
+
+    // claimByChallenger path also credits the remainder
+    function test_v12_ClaimByChallenger_RemainderCredited() public {
+        bytes32[] memory nodes = new bytes32[](1);
+        nodes[0] = NODE_A;
+        bridge.openSlashPeriod(nodes);
+
+        vm.prank(reasoner);
+        uint256 id = bridge.attestReasoning(MODEL_HASH, CONTEXT, _commit(SEED, SALT), OUTPUT);
+        vm.prank(challenger);
+        bridge.challenge(id, keccak256("any"));
+        // Reasoner stays silent → claimByChallenger after reveal window
+        vm.warp(block.timestamp + 1 hours + 1);
+        bridge.claimByChallenger(id);
+
+        assertEq(rewardPool.pendingRewards(operatorA), 5e18, "credit via claimByChallenger");
     }
 }
