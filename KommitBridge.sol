@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./interfaces/ISovereignToken.sol";
 import "./interfaces/ICircuitBreaker.sol";
 import "./interfaces/IKommitBridge.sol";
+import "./interfaces/IMinerRewards.sol";
 
 error KOMMIT__Paused();
 error KOMMIT__ModelNotRegistered();
@@ -70,6 +71,19 @@ error KOMMIT__ChallengerBondTooLow();     // v1.1 — KOM-003
  *         KOM-007 [INFO] — PROTOCOL_ID bumped to "VPAY-GENESIS-KOMMIT-v1.1".
  *
  *         ────────────────────────────────────────────────────────────────
+ *         v1.2 Changelog (MED-3 fix)
+ *         ────────────────────────────────────────────────────────────────
+ *         MED-3 — Slash remainder now credited to MinerRewards operator
+ *           ledger via creditReward(), not just transferred to pool balance.
+ *           KommitBridge must be granted DISTRIBUTOR_ROLE on MinerRewards
+ *           post-deploy. Admin opens slash periods via openSlashPeriod(),
+ *           supplying the set of active nodeIds whose operators will share
+ *           the remainder equally. If no period is active or nodes array is
+ *           empty, SOV still lands in the pool (safe fallback — same as
+ *           v1.1 behaviour). try/catch ensures a bad nodeId config never
+ *           reverts a legitimate slash.
+ *
+ *         ────────────────────────────────────────────────────────────────
  *         Mechanism (v1.1)
  *         ────────────────────────────────────────────────────────────────
  *         1. Register a model's canonical weights hash (one-time, admin-only).
@@ -129,7 +143,7 @@ contract KommitBridge is IKommitBridge, AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     string public constant ARCHITECT = "ANO-YOOFI-AGYEI";
-    string public constant PROTOCOL_ID = "VPAY-GENESIS-KOMMIT-v1.1";   // v1.1 — KOM-007
+    string public constant PROTOCOL_ID = "VPAY-GENESIS-KOMMIT-v1.2";   // v1.2 — MED-3 fix
     string public constant IP_CODENAME = "KOMMIT";
 
     bytes32 public constant REASONER_ROLE   = keccak256("REASONER_ROLE");
@@ -179,6 +193,20 @@ contract KommitBridge is IKommitBridge, AccessControl, ReentrancyGuard {
     uint256 public nextId;
     uint256 private _totalChallenged;
     uint256 private _totalSlashed;
+
+    // ════════════════════════════════════════
+    // v1.2 STATE — slash period distribution
+    // ════════════════════════════════════════
+
+    /// @notice v1.2 — Current slash period identifier.
+    ///         Incremented by openSlashPeriod(). Slashes occurring during
+    ///         period N credit their remainder to the nodeIds registered for N.
+    uint256 public currentPeriodId;
+
+    /// @notice v1.2 — Active nodeIds registered for each slash period.
+    ///         On slash, the poolShare is split equally among these nodes
+    ///         via IMinerRewards.creditReward(). Graceful fallback if empty.
+    mapping(uint256 => bytes32[]) private _periodNodes;
 
     // ════════════════════════════════════════
     // CONSTRUCTOR
@@ -292,6 +320,19 @@ contract KommitBridge is IKommitBridge, AccessControl, ReentrancyGuard {
 
     /// @dev Emitted alongside ReasoningChallenged — carries challenger's replayed hash.
     event ChallengerReplayPosted(uint256 indexed id, bytes32 replayedOutputHash);
+
+    /// @notice v1.2 — Emitted when admin opens a new slash period.
+    event SlashPeriodOpened(uint256 indexed periodId, uint256 nodeCount);
+
+    /// @notice v1.2 — Emitted when slash remainder is credited to period nodes.
+    ///         `credited` is the number of nodes successfully credited (may be
+    ///         less than nodeCount if some had no registered operator).
+    event SlashRemainderCredited(
+        uint256 indexed id,
+        uint256 indexed periodId,
+        uint256 remainder,
+        uint256 credited
+    );
 
     // ════════════════════════════════════════
     // CORE — REVEAL (v1.1, replaces v1.0 resolveChallenge)
@@ -423,6 +464,12 @@ contract KommitBridge is IKommitBridge, AccessControl, ReentrancyGuard {
         }
 
         emit ReasoningSlashed(id, expectedOutputHash, a.outputHash, a.reasonerBond);
+
+        // v1.2 (MED-3): credit the remainder into operator ledger.
+        // Called AFTER transfer so pool already holds the tokens.
+        if (poolShare > 0) {
+            _creditSlashRemainder(id, poolShare);
+        }
     }
 
     function _dismissChallenge(uint256 id) internal {
@@ -517,6 +564,34 @@ contract KommitBridge is IKommitBridge, AccessControl, ReentrancyGuard {
         minerRewardsPool = _pool;
     }
 
+    /**
+     * @notice v1.2 (MED-3) — Open a new slash period with the given active nodeIds.
+     *         Any slash that occurs after this call will split its pool remainder
+     *         equally across these nodeIds via IMinerRewards.creditReward().
+     *
+     *         Prerequisites:
+     *         - Each nodeId must have a registered operator in MinerRewards.
+     *         - KommitBridge must hold DISTRIBUTOR_ROLE on the MinerRewards contract.
+     *
+     *         Calling with an empty nodeIds array is valid — slashes in that
+     *         period will fall back to the v1.1 behaviour (SOV lands in pool
+     *         balance, uncredited).
+     *
+     * @param nodeIds Active node IDs for this period (max 200).
+     */
+    function openSlashPeriod(bytes32[] calldata nodeIds)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(nodeIds.length <= 200, "Too many nodes");
+        uint256 pid = ++currentPeriodId;
+        for (uint256 i; i < nodeIds.length; ) {
+            _periodNodes[pid].push(nodeIds[i]);
+            unchecked { ++i; }
+        }
+        emit SlashPeriodOpened(pid, nodeIds.length);
+    }
+
     // ════════════════════════════════════════
     // VIEWS
     // ════════════════════════════════════════
@@ -576,5 +651,53 @@ contract KommitBridge is IKommitBridge, AccessControl, ReentrancyGuard {
      */
     function computeSeedCommit(bytes32 seed, bytes32 salt) external pure returns (bytes32) {
         return keccak256(abi.encodePacked(seed, salt));
+    }
+
+    /// @notice v1.2 — Returns the nodeIds registered for a given slash period.
+    function periodNodes(uint256 periodId) external view returns (bytes32[] memory) {
+        return _periodNodes[periodId];
+    }
+
+    // ════════════════════════════════════════
+    // INTERNAL — v1.2 SLASH CREDIT
+    // ════════════════════════════════════════
+
+    /**
+     * @notice v1.2 (MED-3) — Credit slashed-bond remainder to the operator
+     *         ledger of each node in the current slash period.
+     *
+     *         Design notes:
+     *         - Called after the SOV transfer, so the pool already holds the tokens.
+     *         - Splits `remainder` equally; integer dust (remainder % nodeCount)
+     *           stays in the pool balance (acceptable rounding, same as v1.1).
+     *         - try/catch: a node with no registered operator (or any other revert
+     *           from IMinerRewards) is silently skipped — we must never revert a
+     *           legitimate slash due to an admin misconfiguration of the rewards pool.
+     *         - If no period is active (currentPeriodId == 0) or the period has no
+     *           nodes, we return immediately; this is the exact v1.1 fallback.
+     *
+     * @param id        Attestation id (carried into the emitted event).
+     * @param remainder Pool share already transferred to minerRewardsPool.
+     */
+    function _creditSlashRemainder(uint256 id, uint256 remainder) internal {
+        if (minerRewardsPool == address(0)) return;
+        bytes32[] storage nodes = _periodNodes[currentPeriodId];
+        uint256 n = nodes.length;
+        if (n == 0) return; // graceful fallback: SOV sits in pool balance (v1.1 behaviour)
+
+        uint256 perNode = remainder / n;
+        if (perNode == 0) return; // dust too small to distribute
+
+        uint256 credited;
+        for (uint256 i; i < n; ) {
+            // try/catch: do not revert the slash if creditReward fails
+            // (unregistered operator, pool is not IMinerRewards, etc.)
+            try IMinerRewards(minerRewardsPool).creditReward(nodes[i], perNode) {
+                unchecked { ++credited; }
+            } catch {}
+            unchecked { ++i; }
+        }
+
+        emit SlashRemainderCredited(id, currentPeriodId, remainder, credited);
     }
 }
