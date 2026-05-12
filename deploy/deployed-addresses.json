@@ -12,7 +12,7 @@
     "AttestationBridge": "0x0ba2c622a2571c449fed251b165096f48adb8b0a",
     "VPAYVault":         "0x8e0cec6a163ad43b1df8d050acf162f251d37165",
     "GuardianBond":      "0x180a4d91daead13cabe2cc60985a8808eab82ff1",
-    "KommitBridge":      "0x7EA30Ea8A14041380E04d4678B9A7E2173AcD528",
+    "KommitBridge":      "0x6B986eF2EFDB5852F1DAa51e450E3ecA86B1590E",
     "SOVVesting":        "0x452987FE45BbbF38A8cf12854F99983b549369F1"
   },
   "roles": {
@@ -27,15 +27,22 @@
   },
   "kommit": {
     "contract":           "KommitBridge",
-    "address":            "0x7EA30Ea8A14041380E04d4678B9A7E2173AcD528",
-    "version":            "v1.1",
-    "deployedAt":         "2026-04-22",
+    "address":            "0x6B986eF2EFDB5852F1DAa51e450E3ecA86B1590E",
+    "version":            "v1.2",
+    "protocolId":         "VPAY-GENESIS-KOMMIT-v1.2",
+    "deployedAt":         "2026-05-12",
+    "deployTxHash":       "0xa5939a07b90e374bb28765131e55a0a3351ea048b06d1e9f043def4d8b7b6963",
+    "deployBlock":        86773682,
     "deployTxChain":      137,
+    "deployCostPOL":      "0.981",
     "polygonscanVerified": true,
+    "polygonscanVerifiedAt": "2026-05-12",
+    "polygonscan_url":    "https://polygonscan.com/address/0x6b986ef2efdb5852f1daa51e450e3eca86b1590e#code",
     "admin":              "0xFc93b70fAa2045e19CEae43d1b645b2137c68A67",
     "deployer_renounced_admin": true,
     "reasoner_wallet":    "0x13C682Ad10797415eDe7B85C2b9a2Ad539B18e92",
     "oracle_wallet":      "0xA326089D225616970EAA115f4d7cAf38DC564268",
+    "implementationSource": "PR #1 on ecovent-africa/vpay-sovereign by @MukeshVermaLegit (Mukesh Verma — MED-3 slash-remainder credit fix, 5 files, +493/-2 lines, 119/119 Foundry tests, 256-run x 128k-call invariant fuzz clean)",
     "dependencies": {
       "SovereignToken":  "0x5833ABF0Ecfe61e85682F3720BA4d636084e0eC0",
       "CircuitBreaker":  "0xeaef8dc4872a73815aea74a31ff7c83fdaa347d4",
@@ -50,15 +57,24 @@
       "challenge_bounty_bps":   5000
     },
     "post_deploy_todo": [
+      "Safe-signed MinerRewards.grantRole(DISTRIBUTOR_ROLE, 0x6B986eF2EFDB5852F1DAa51e450E3ecA86B1590E) to permit operator-credit distribution",
+      "Safe-signed KommitBridge.openSlashPeriod(<active nodeIds>) to seed period 1 with current operator roster",
       "Seed model registry via Safe-signed registerModel() calls (canonical hermes-v2-zeus weights)",
-      "REASONER wallet approves new KommitBridge for SOV spending (10 SOV per attestation)",
-      "Wire hermes_v2/kommit_client.py to new v1.1 address",
-      "Patch vpay-hmi-cockpit.html Kommit panel address",
-      "Full v1.1 rewrite of Kommit-Integration-Spec.md"
+      "Wire hermes_v2/kommit_client.py KOMMIT_ADDRESS v1.1 -> v1.2",
+      "Patch vpay-hmi-cockpit.html Kommit panel (4 v1.1 references -> v1.2)",
+      "Full v1.2 rewrite of Kommit-Integration-Spec.md",
+      "Pay Mukesh M0 retro ($2,000 USD wire + 5,000 SOV grant)",
+      "M0+ follow-up commit by Mukesh: DeployKommit.s.sol log/banner v1.1 -> v1.2 string sweep + line-78 hardcoded DEPLOYER constant -> vm.addr(deployerKey)"
     ],
-    "polygonscan_verified_at": "2026-04-22",
-    "polygonscan_url":          "https://polygonscan.com/address/0x7ea30ea8a14041380e04d4678b9a7e2173acd528#code",
     "previous_versions": {
+      "v1.1": {
+        "address":     "0x7EA30Ea8A14041380E04d4678B9A7E2173AcD528",
+        "deployedAt":  "2026-04-22",
+        "deprecated":  "2026-05-12",
+        "polygonscanVerified": true,
+        "polygonscan_url": "https://polygonscan.com/address/0x7ea30ea8a14041380e04d4678b9a7e2173acd528#code",
+        "reason":      "v1.2 supersedes with MED-3 fix: openSlashPeriod(bytes32[]) admin function + _creditSlashRemainder() internal hook that pro-rata credits slashed-bond remainder to active period operators via MinerRewards.creditReward(). Storage append-only verified via forge inspect storage-layout diff."
+      },
       "v1.0": {
         "address":     "0x50D7715848B50383e93820753c7aa23FE7814c0a",
         "deployedAt":  "2026-04-21",
@@ -108,7 +124,7 @@
     "Addresses are non-checksummed (lowercase) as pulled from Foundry broadcast file.",
     "Ethereum accepts either checksum or lowercase form — these are valid.",
     "Admin migration to Safe pending; to be executed via MigrateAdminToSafe.s.sol.",
-    "KommitBridge v1.1 (VPAY Genesis IP #2 — Proof of Reasoning) deployed 2026-04-22 to Polygon Mainnet with atomic admin migration to Safe + role grants to operational wallets. v1.0 (0x50D7...4c0a) is deprecated as of 2026-04-22 — v1.1 supersedes it with KOM-001..007 + KOM-OPS-1 audit fixes. Polygonscan source verification COMPLETE 2026-04-22 (manual forge verify-contract via Etherscan v2 unified API key, since --verify was dropped from broadcast due to public-RPC compatibility): https://polygonscan.com/address/0x7ea30ea8a14041380e04d4678b9a7e2173acd528#code",
+    "KommitBridge v1.2 (VPAY Genesis IP #2 — Proof of Reasoning) deployed 2026-05-12 to Polygon Mainnet at 0x6B986eF2EFDB5852F1DAa51e450E3ecA86B1590E in block 86773682 (5 atomic txs, 0.981 POL total at 408 gwei avg). Atomic admin migration to Safe + role grants to operational wallets in deploy broadcast. PROTOCOL_ID on-chain = VPAY-GENESIS-KOMMIT-v1.2. v1.2 supersedes v1.1 (0x7EA30Ea8...) with MED-3 fix: openSlashPeriod() admin function + _creditSlashRemainder() internal hook that pro-rata credits slashed-bond remainder to active period operators via MinerRewards.creditReward(). Implementation source: PR #1 on ecovent-africa/vpay-sovereign by @MukeshVermaLegit. Polygonscan source verification COMPLETE 2026-05-12 (manual forge verify-contract via Etherscan v2 unified API key): https://polygonscan.com/address/0x6b986ef2efdb5852f1daa51e450e3eca86b1590e#code. v1.1 (0x7EA30Ea8...) deprecated 2026-05-12. v1.0 (0x50D7...4c0a) deprecated 2026-04-22.",
     "SOVVesting deployed 2026-04-22 to Polygon Mainnet at 0x452987FE45BbbF38A8cf12854F99983b549369F1. Closes Round 2 Audit HIGH-1 (founder genesis on hot key). 18,999,950 SOV (full deployer balance) bound to OZ VestingWalletCliff schedule: 12mo cliff, 4yr linear, beneficiary=Safe, irrevocable. The headline 19M minus 50 SOV operational carve-out on REASONER (0x13C6...8e92) — see sov_vesting.carveOut. Polygonscan verification still pending."
   ]
 }
